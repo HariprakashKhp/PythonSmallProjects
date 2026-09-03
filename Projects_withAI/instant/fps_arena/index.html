@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arena Duel - FPS</title>
+<style>
+  html, body { margin:0; padding:0; overflow:hidden; background:#000; font-family:'Courier New', monospace; }
+  canvas { display:block; }
+
+  #hud {
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    pointer-events:none; color:#0f0; z-index:10;
+  }
+
+  #crosshair {
+    position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+    width:20px; height:20px;
+  }
+  #crosshair::before, #crosshair::after {
+    content:''; position:absolute; background:#0f0;
+  }
+  #crosshair::before { left:9px; top:0; width:2px; height:20px; }
+  #crosshair::after { top:9px; left:0; width:20px; height:2px; }
+
+  .bar-wrap {
+    position:absolute; width:220px; height:22px; border:2px solid #0f0; background:rgba(0,0,0,0.5);
+  }
+  #player-bar-wrap { bottom:20px; left:20px; }
+  #bot-bar-wrap { top:20px; right:20px; }
+  .bar-fill { height:100%; background:#0f0; width:100%; transition: width 0.15s ease; }
+  #bot-bar-fill { background:#f33; }
+  .bar-label { position:absolute; top:-20px; left:0; font-size:13px; text-shadow:1px 1px 2px #000; }
+
+  #msg {
+    position:absolute; top:40%; left:50%; transform:translate(-50%,-50%);
+    font-size:42px; text-align:center; text-shadow:2px 2px 4px #000;
+    display:none;
+  }
+  #sub {
+    position:absolute; top:55%; left:50%; transform:translate(-50%,-50%);
+    font-size:18px; text-align:center; text-shadow:2px 2px 4px #000;
+    display:none;
+  }
+
+  #startScreen {
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    background:rgba(0,0,0,0.9); color:#0f0; z-index:20;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; font-family:'Courier New', monospace;
+  }
+  #startScreen h1 { font-size:48px; text-shadow: 0 0 10px #0f0; }
+  #startScreen p { font-size:16px; max-width:500px; line-height:1.6; }
+  #startScreen button {
+    margin-top:20px; padding:12px 30px; font-size:20px; background:#0f0; color:#000;
+    border:none; cursor:pointer; font-family:inherit; font-weight:bold;
+  }
+  #startScreen button:hover { background:#3f3; }
+
+  #ammo {
+    position:absolute; bottom:20px; right:20px; font-size:16px; text-shadow:1px 1px 2px #000;
+  }
+</style>
+</head>
+<body>
+
+<div id="startScreen">
+  <h1>ARENA DUEL</h1>
+  <p>
+    A first-person duel against one AI opponent in a closed arena.<br><br>
+    <b>MOUSE</b> - look / aim<br>
+    <b>W A S D</b> or <b>&uarr; &larr; &darr; &rarr;</b> - move<br>
+    <b>CLICK</b> or <b>SPACE</b> - fire<br><br>
+    Click the arena to lock the mouse. Press ESC to release it.<br><br>
+    Reduce the enemy's health to zero before it does the same to you.
+  </p>
+  <button id="startBtn">START GAME</button>
+</div>
+
+<div id="hud">
+  <div id="crosshair"></div>
+
+  <div id="player-bar-wrap" class="bar-wrap">
+    <div class="bar-label">YOU</div>
+    <div id="player-bar-fill" class="bar-fill"></div>
+  </div>
+
+  <div id="bot-bar-wrap" class="bar-wrap">
+    <div class="bar-label" style="text-align:right; right:0;">ENEMY</div>
+    <div id="bot-bar-fill" class="bar-fill"></div>
+  </div>
+
+  <div id="ammo">READY</div>
+
+  <div id="msg"></div>
+  <div id="sub"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+  // ---------- Basic setup ----------
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x111318);
+  scene.fog = new THREE.Fog(0x111318, 15, 55);
+
+  const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 200);
+  const renderer = new THREE.WebGLRenderer({ antialias:true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  document.body.appendChild(renderer.domElement);
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // ---------- Lighting ----------
+  scene.add(new THREE.AmbientLight(0x556677, 0.9));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+  dirLight.position.set(10, 20, 10);
+  dirLight.castShadow = true;
+  dirLight.shadow.mapSize.set(1024, 1024);
+  dirLight.shadow.camera.left = -30;
+  dirLight.shadow.camera.right = 30;
+  dirLight.shadow.camera.top = 30;
+  dirLight.shadow.camera.bottom = -30;
+  scene.add(dirLight);
+
+  const ARENA_SIZE = 40;
+  const WALL_HEIGHT = 8;
+
+  // ---------- Floor ----------
+  const floorMat = new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.9 });
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(ARENA_SIZE, ARENA_SIZE), floorMat);
+  floor.rotation.x = -Math.PI/2;
+  floor.receiveShadow = true;
+  scene.add(floor);
+
+  // grid lines for visual reference
+  const grid = new THREE.GridHelper(ARENA_SIZE, 20, 0x00ff66, 0x333333);
+  grid.position.y = 0.01;
+  scene.add(grid);
+
+  // ---------- Walls ----------
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0x3a3f4a, roughness: 0.8 });
+  const walls = [];
+  function addWall(x, z, w, d) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_HEIGHT, d), wallMat);
+    wall.position.set(x, WALL_HEIGHT/2, z);
+    wall.castShadow = true;
+    wall.receiveShadow = true;
+    scene.add(wall);
+    walls.push({ mesh: wall, box: new THREE.Box3().setFromObject(wall) });
+  }
+  const half = ARENA_SIZE/2;
+  addWall(0, -half, ARENA_SIZE, 1);
+  addWall(0, half, ARENA_SIZE, 1);
+  addWall(-half, 0, 1, ARENA_SIZE);
+  addWall(half, 0, 1, ARENA_SIZE);
+
+  // ---------- Obstacles / cover pillars ----------
+  const pillarMat = new THREE.MeshStandardMaterial({ color: 0x5a4a3a, roughness: 0.7 });
+  const pillarPositions = [
+    [-10, -10], [10, -10], [-10, 10], [10, 10],
+    [4, -12], [-4, 12], [-15, 0], [15, 0]
+  ];
+  pillarPositions.forEach(([x, z]) => {
+    const h = 4 + Math.random()*2;
+    const pillar = new THREE.Mesh(new THREE.BoxGeometry(2, h, 2), pillarMat);
+    pillar.position.set(x, h/2, z);
+    pillar.castShadow = true;
+    pillar.receiveShadow = true;
+    scene.add(pillar);
+    walls.push({ mesh: pillar, box: new THREE.Box3().setFromObject(pillar) });
+  });
+
+  // ---------- Player ----------
+  const player = {
+    pos: new THREE.Vector3(0, 1.7, 15),
+    yaw: 0,
+    health: 100,
+    radius: 0.6,
+    speed: 8,
+    turnSpeed: 2.2,
+    fireCooldown: 0,
+    alive: true
+  };
+  camera.position.copy(player.pos);
+  camera.rotation.set(0, player.yaw, 0);
+
+  // ---------- Enemy bot ----------
+  const botGroup = new THREE.Group();
+  const botBodyMat = new THREE.MeshStandardMaterial({ color: 0xdd2222, roughness: 0.5 });
+  const botHeadMat = new THREE.MeshStandardMaterial({ color: 0xffcc99, roughness: 0.6 });
+
+  const botBody = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 1.2, 12), botBodyMat);
+  botBody.position.y = 1.0;
+  botBody.castShadow = true;
+  botGroup.add(botBody);
+
+  const botBodyTop = new THREE.Mesh(new THREE.SphereGeometry(0.5, 12, 12, 0, Math.PI*2, 0, Math.PI/2), botBodyMat);
+  botBodyTop.position.y = 1.6;
+  botBodyTop.castShadow = true;
+  botGroup.add(botBodyTop);
+
+  const botBodyBottom = new THREE.Mesh(new THREE.SphereGeometry(0.5, 12, 12, 0, Math.PI*2, Math.PI/2, Math.PI/2), botBodyMat);
+  botBodyBottom.position.y = 0.4;
+  botBodyBottom.castShadow = true;
+  botGroup.add(botBodyBottom);
+
+  const botHead = new THREE.Mesh(new THREE.SphereGeometry(0.35, 12, 12), botHeadMat);
+  botHead.position.y = 1.95;
+  botHead.castShadow = true;
+  botGroup.add(botHead);
+
+  const gunMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+  const botGun = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 0.8), gunMat);
+  botGun.position.set(0.4, 1.3, -0.4);
+  botGroup.add(botGun);
+
+  scene.add(botGroup);
+
+  const bot = {
+    pos: new THREE.Vector3(0, 0, -15),
+    yaw: 0,
+    health: 100,
+    radius: 0.7,
+    speed: 4.5,
+    fireCooldown: 2,
+    alive: true,
+    strafeDir: 1,
+    strafeTimer: 0,
+    state: 'seek' // seek | strafe | retreat
+  };
+  botGroup.position.copy(bot.pos);
+
+  // ---------- Muzzle flash / tracers ----------
+  const tracerMat = new THREE.LineBasicMaterial({ color: 0xffff00 });
+  function spawnTracer(from, to, color) {
+    const mat = new THREE.LineBasicMaterial({ color: color || 0xffff00 });
+    const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
+    const line = new THREE.Line(geo, mat);
+    scene.add(line);
+    let life = 0.15;
+    const anim = () => {
+      life -= 0.016;
+      mat.opacity = Math.max(0, life / 0.15);
+      mat.transparent = true;
+      if (life <= 0) { scene.remove(line); return; }
+      requestAnimationFrame(anim);
+    };
+    anim();
+  }
+
+  function flashAt(pos) {
+    const light = new THREE.PointLight(0xffee88, 3, 6);
+    light.position.copy(pos);
+    scene.add(light);
+    setTimeout(() => scene.remove(light), 60);
+  }
+
+  // ---------- Collision helpers ----------
+  function collidesWithWalls(pos, radius) {
+    for (const w of walls) {
+      const box = w.box;
+      const closestX = Math.max(box.min.x, Math.min(pos.x, box.max.x));
+      const closestZ = Math.max(box.min.z, Math.min(pos.z, box.max.z));
+      const dx = pos.x - closestX;
+      const dz = pos.z - closestZ;
+      if (dx*dx + dz*dz < radius*radius) return true;
+    }
+    const b = half - 1.2;
+    if (pos.x < -b || pos.x > b || pos.z < -b || pos.z > b) return true;
+    return false;
+  }
+
+  function lineOfSight(fromPos, toPos) {
+    const dir = new THREE.Vector3().subVectors(toPos, fromPos);
+    const dist = dir.length();
+    dir.normalize();
+    const ray = new THREE.Raycaster(fromPos.clone(), dir, 0.1, dist - 0.5);
+    const meshes = walls.map(w => w.mesh);
+    const hits = ray.intersectObjects(meshes, false);
+    return hits.length === 0;
+  }
+
+  // ---------- Input ----------
+  const keys = {};
+  window.addEventListener('keydown', (e) => {
+    keys[e.code] = true;
+    if (e.code === 'Space') e.preventDefault();
+    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+  });
+  window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+  const MOUSE_SENSITIVITY = 0.0022;
+  let wantFire = false;
+
+  document.addEventListener('mousemove', (e) => {
+    if (document.pointerLockElement !== renderer.domElement) return;
+    player.yaw -= e.movementX * MOUSE_SENSITIVITY;
+  });
+
+  renderer.domElement.addEventListener('mousedown', (e) => {
+    if (document.pointerLockElement !== renderer.domElement) {
+      renderer.domElement.requestPointerLock();
+      return;
+    }
+    if (e.button === 0) wantFire = true;
+  });
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 0) wantFire = false;
+  });
+
+  // ---------- Game state ----------
+  let gameRunning = false;
+  let gameOver = false;
+
+  document.getElementById('startBtn').addEventListener('click', () => {
+    document.getElementById('startScreen').style.display = 'none';
+    gameRunning = true;
+    clock.start();
+    renderer.domElement.requestPointerLock();
+  });
+
+  const playerBarFill = document.getElementById('player-bar-fill');
+  const botBarFill = document.getElementById('bot-bar-fill');
+  const msgEl = document.getElementById('msg');
+  const subEl = document.getElementById('sub');
+  const ammoEl = document.getElementById('ammo');
+
+  function updateBars() {
+    playerBarFill.style.width = Math.max(0, player.health) + '%';
+    botBarFill.style.width = Math.max(0, bot.health) + '%';
+  }
+
+  function endGame(playerWon) {
+    gameOver = true;
+    gameRunning = false;
+    msgEl.style.display = 'block';
+    subEl.style.display = 'block';
+    msgEl.textContent = playerWon ? 'VICTORY' : 'YOU DIED';
+    msgEl.style.color = playerWon ? '#0f0' : '#f33';
+    subEl.textContent = 'Refresh the page to play again';
+  }
+
+  // ---------- Player firing ----------
+  const raycaster = new THREE.Raycaster();
+  function playerShoot() {
+    if (player.fireCooldown > 0 || !player.alive || gameOver) return;
+    player.fireCooldown = 0.4;
+
+    const dir = new THREE.Vector3(Math.sin(player.yaw) * -1, 0, Math.cos(player.yaw) * -1).normalize();
+    const from = camera.position.clone();
+    const to = from.clone().addScaledVector(dir, 60);
+
+    raycaster.set(from, dir);
+    raycaster.far = 60;
+
+    // check wall blocking distance
+    const wallHits = raycaster.intersectObjects(walls.map(w => w.mesh), false);
+    const wallDist = wallHits.length ? wallHits[0].distance : Infinity;
+
+    // check bot hit (sphere test against ray)
+    const botCenter = bot.pos.clone().addScaledVector(new THREE.Vector3(0,1,0), 1);
+    const closest = new THREE.Vector3();
+    const rayToBotEnd = from.clone().addScaledVector(dir, Math.min(60, wallDist));
+    const line = new THREE.Line3(from, rayToBotEnd);
+    line.closestPointToPoint(botCenter, true, closest);
+    const hitDist = closest.distanceTo(botCenter);
+
+    let tracerEnd = to;
+    if (hitDist < 0.9 && bot.alive) {
+      tracerEnd = closest;
+      bot.health -= 20;
+      flashAt(botCenter);
+      if (bot.health <= 0) {
+        bot.alive = false;
+        botGroup.visible = false;
+        endGame(true);
+      }
+    } else if (wallHits.length) {
+      tracerEnd = wallHits[0].point;
+    }
+
+    spawnTracer(from.clone().addScaledVector(dir, 0.5), tracerEnd, 0x00ffff);
+    updateBars();
+  }
+
+  // ---------- Bot firing ----------
+  function botShoot() {
+    if (!bot.alive || !player.alive || gameOver) return;
+    const botEye = bot.pos.clone().addScaledVector(new THREE.Vector3(0,1,0), 1.7);
+    if (!lineOfSight(botEye, camera.position)) return;
+
+    const dir = new THREE.Vector3().subVectors(camera.position, botEye).normalize();
+    // accuracy scales with distance; add spread
+    const dist = botEye.distanceTo(camera.position);
+    const spread = Math.min(0.35, 0.05 + dist * 0.012);
+    dir.x += (Math.random()-0.5) * spread;
+    dir.y += (Math.random()-0.5) * spread * 0.5;
+    dir.z += (Math.random()-0.5) * spread;
+    dir.normalize();
+
+    const to = botEye.clone().addScaledVector(dir, dist + 2);
+    spawnTracer(botEye, to, 0xff3333);
+    flashAt(botEye.clone().addScaledVector(dir, 0.5));
+
+    // hit chance based on how close the shot direction is to a perfect aim
+    const perfectDir = new THREE.Vector3().subVectors(camera.position, botEye).normalize();
+    const accuracy = dir.dot(perfectDir);
+    const hitChance = Math.max(0, (accuracy - 0.9) / 0.1); // only near-perfect shots hit
+
+    if (Math.random() < hitChance) {
+      player.health -= 12;
+      if (player.health <= 0) {
+        player.alive = false;
+        endGame(false);
+      }
+      updateBars();
+    }
+  }
+
+  // ---------- Bot AI ----------
+  function updateBot(dt) {
+    if (!bot.alive || !player.alive || gameOver) return;
+
+    const toPlayer = new THREE.Vector3().subVectors(camera.position, bot.pos);
+    toPlayer.y = 0;
+    const dist = toPlayer.length();
+    toPlayer.normalize();
+
+    // face the player
+    bot.yaw = Math.atan2(toPlayer.x, toPlayer.z);
+    botGroup.rotation.y = bot.yaw;
+
+    bot.strafeTimer -= dt;
+    if (bot.strafeTimer <= 0) {
+      bot.strafeTimer = 1.5 + Math.random() * 1.5;
+      bot.strafeDir = Math.random() < 0.5 ? 1 : -1;
+      bot.state = dist < 6 ? 'retreat' : (dist > 20 ? 'seek' : 'strafe');
+    }
+
+    const right = new THREE.Vector3(toPlayer.z, 0, -toPlayer.x);
+    let moveVec = new THREE.Vector3();
+
+    if (bot.state === 'seek') {
+      moveVec.add(toPlayer);
+    } else if (bot.state === 'retreat') {
+      moveVec.addScaledVector(toPlayer, -1);
+      moveVec.addScaledVector(right, bot.strafeDir * 0.5);
+    } else {
+      moveVec.addScaledVector(right, bot.strafeDir);
+    }
+
+    if (moveVec.lengthSq() > 0) {
+      moveVec.normalize();
+      const newPos = bot.pos.clone().addScaledVector(moveVec, bot.speed * dt);
+      if (!collidesWithWalls(newPos, bot.radius)) {
+        bot.pos.copy(newPos);
+      }
+    }
+
+    botGroup.position.set(bot.pos.x, 0, bot.pos.z);
+
+    bot.fireCooldown -= dt;
+    if (bot.fireCooldown <= 0 && dist < 30) {
+      botShoot();
+      bot.fireCooldown = 0.9 + Math.random() * 1.1;
+    }
+  }
+
+  // ---------- Player update ----------
+  function updatePlayer(dt) {
+    if (!player.alive || gameOver) return;
+
+    const forward = new THREE.Vector3(Math.sin(player.yaw) * -1, 0, Math.cos(player.yaw) * -1);
+    const right = new THREE.Vector3(-forward.z, 0, forward.x);
+    let move = new THREE.Vector3();
+    if (keys['ArrowUp'] || keys['KeyW']) move.add(forward);
+    if (keys['ArrowDown'] || keys['KeyS']) move.addScaledVector(forward, -1);
+    if (keys['KeyD']) move.add(right);
+    if (keys['KeyA']) move.addScaledVector(right, -1);
+
+    if (move.lengthSq() > 0) {
+      move.normalize();
+      const newPos = player.pos.clone().addScaledVector(move, player.speed * dt);
+      if (!collidesWithWalls(newPos, player.radius)) {
+        player.pos.copy(newPos);
+      }
+    }
+
+    if (keys['Space'] || wantFire) playerShoot();
+
+    player.fireCooldown -= dt;
+    ammoEl.textContent = player.fireCooldown > 0 ? 'RELOADING' : 'READY';
+
+    camera.position.set(player.pos.x, 1.7, player.pos.z);
+    camera.rotation.set(0, player.yaw, 0);
+  }
+
+  // ---------- Main loop ----------
+  const clock = new THREE.Clock();
+  function animate() {
+    requestAnimationFrame(animate);
+    const dt = Math.min(0.05, clock.getDelta());
+    if (gameRunning) {
+      updatePlayer(dt);
+      updateBot(dt);
+    }
+    renderer.render(scene, camera);
+  }
+  animate();
+})();
+</script>
+</body>
+</html>
